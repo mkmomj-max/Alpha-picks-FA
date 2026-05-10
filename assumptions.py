@@ -13,6 +13,7 @@ import pandas as pd
 import yfinance as yf
 
 from financial_analysis import get_statements, growth_rates
+from overrides import get_override
 
 
 RISK_FREE_RATE = 0.043
@@ -35,7 +36,17 @@ SECTOR_GROWTH = {
 
 
 def suggest_wacc(symbol: str) -> dict:
-    """CAPM: WACC = rf + beta * ERP (simplified, equity-only)."""
+    """CAPM: WACC = rf + beta * ERP (simplified, equity-only).
+    Honor override if set."""
+    ov = get_override(symbol)
+    if ov.get("custom_wacc"):
+        wacc = float(ov["custom_wacc"])
+        return {
+            "wacc": wacc, "beta": None, "rf": None, "erp": None,
+            "explanation": f"📤 Manual override: WACC = {wacc*100:.1f}%",
+            "is_override": True,
+        }
+
     info = yf.Ticker(symbol).info or {}
     beta = info.get("beta") or DEFAULT_BETA
 
@@ -58,16 +69,16 @@ def suggest_wacc(symbol: str) -> dict:
 
 def suggest_growth(symbol: str) -> dict:
     """Blend 4 sources to suggest growth rate.
-
-    Output:
-      - bear / base / bull rates
-      - source breakdown
-      - confidence level
-    """
+    Honor override if set."""
+    ov = get_override(symbol)
     info = yf.Ticker(symbol).info or {}
     sector = info.get("sector", "Unknown")
 
     sources = {}
+    if ov.get("eps_growth"):
+        sources["override_eps_growth"] = float(ov["eps_growth"])
+    if ov.get("revenue_growth"):
+        sources["override_revenue_growth"] = float(ov["revenue_growth"])
 
     rev_g = info.get("revenueGrowth")
     eps_g = info.get("earningsGrowth")
@@ -98,7 +109,8 @@ def suggest_growth(symbol: str) -> dict:
     else:
         weights = []
         for k in sources:
-            if "analyst" in k:    weights.append(0.35)
+            if "override" in k:    weights.append(0.50)
+            elif "analyst" in k:    weights.append(0.35)
             elif "historical" in k: weights.append(0.30)
             else:                  weights.append(0.20)
         total_w = sum(weights[:len(valid)])
@@ -136,9 +148,19 @@ def _explain_growth(sources: dict, base: float, sector: str) -> str:
 
 
 def suggest_pe_multiple(symbol: str) -> dict:
-    """Suggest P/E multiple based on quality (ROE, margin) + sector base."""
+    """Suggest P/E multiple based on quality + sector base. Honor override."""
+    ov = get_override(symbol)
     info = yf.Ticker(symbol).info or {}
     sector = info.get("sector", "Unknown")
+
+    if ov.get("custom_pe"):
+        pe = float(ov["custom_pe"])
+        return {
+            "base_pe": None, "adjusted_pe": pe,
+            "quality_premium_pct": 0, "sector": sector,
+            "notes": [f"📤 Manual override: P/E = {pe:.1f}×"],
+            "is_override": True,
+        }
 
     from fair_value import SECTOR_PE
     base_pe = SECTOR_PE.get(sector, 18)

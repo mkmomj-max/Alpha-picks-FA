@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from overrides import get_override
+
 
 DEFAULT_DISCOUNT_RATE = 0.10
 DEFAULT_TERMINAL_GROWTH = 0.025
@@ -111,15 +113,20 @@ def dcf_value(
 # ── 2. Multiples Valuation ────────────────────────────────────────
 def multiples_value(ticker_obj: yf.Ticker) -> dict:
     info = ticker_obj.info or {}
+    symbol = info.get("symbol", "")
+    ov = get_override(symbol) if symbol else {}
+
     sector = info.get("sector", "Unknown")
-    eps = _safe(info.get("forwardEps")) or _safe(info.get("trailingEps"))
+
+    eps = (ov.get("adj_eps_fwd") or ov.get("adj_eps_ttm")
+           or _safe(info.get("forwardEps")) or _safe(info.get("trailingEps")))
     ebitda = _safe(info.get("ebitda"))
     shares = _safe(info.get("sharesOutstanding"))
     debt = _safe(info.get("totalDebt"), 0)
     cash = _safe(info.get("totalCash"), 0)
 
-    pe_target = SECTOR_PE.get(sector, 18)
-    ev_target = SECTOR_EV_EBITDA.get(sector, 12)
+    pe_target = ov.get("custom_pe") or SECTOR_PE.get(sector, 18)
+    ev_target = ov.get("custom_ev_ebitda") or SECTOR_EV_EBITDA.get(sector, 12)
 
     pe_value = eps * pe_target if eps and eps > 0 else None
 
@@ -146,7 +153,9 @@ def multiples_value(ticker_obj: yf.Ticker) -> dict:
 # ── 3. Graham Number ──────────────────────────────────────────────
 def graham_value(ticker_obj: yf.Ticker) -> dict:
     info = ticker_obj.info or {}
-    eps = _safe(info.get("trailingEps"))
+    symbol = info.get("symbol", "")
+    ov = get_override(symbol) if symbol else {}
+    eps = ov.get("adj_eps_ttm") or _safe(info.get("trailingEps"))
     bvps = _safe(info.get("bookValue"))
 
     if not eps or not bvps or eps <= 0 or bvps <= 0:
@@ -196,6 +205,27 @@ def composite_fair_value(
     tk = yf.Ticker(symbol)
     info = tk.info or {}
     current_price = _safe(info.get("currentPrice")) or _safe(info.get("regularMarketPrice"))
+
+    ov = get_override(symbol)
+    if ov.get("base_fv"):
+        composite = float(ov["base_fv"])
+        margin_of_safety = ((composite - current_price) / current_price * 100) if current_price else None
+        verdict = "N/A"
+        if margin_of_safety is not None:
+            if margin_of_safety >= 30:   verdict = "🟢 Strong Undervalued"
+            elif margin_of_safety >= 10: verdict = "🟢 Undervalued"
+            elif margin_of_safety >= -10: verdict = "🟡 Fair Value"
+            elif margin_of_safety >= -30: verdict = "🔴 Overvalued"
+            else:                         verdict = "🔴 Strong Overvalued"
+        return {
+            "symbol": symbol, "current_price": current_price,
+            "composite_fair_value": composite,
+            "margin_of_safety_pct": margin_of_safety,
+            "verdict": verdict + " (📤 manual)",
+            "is_override": True,
+            "models": {"manual": {"method": "Manual Override", "fair_value": composite}},
+            "weights": {"manual": 1.0},
+        }
 
     results = {
         "dcf":       dcf_value(tk, discount_rate=discount_rate, growth_rate=growth_rate),

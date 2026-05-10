@@ -25,6 +25,11 @@ from peer_compare import find_peers, compare_peers, relative_rank
 from alerts import evaluate_single, evaluate_portfolio, bulk_fair_value
 from assumptions import full_auto_suggest
 from scenario_valuation import scenario_valuation
+from overrides import (
+    load_overrides, save_overrides, get_override, set_override,
+    delete_override, list_overrides, SCHEMA,
+)
+from file_parser import parse_file, template_csv
 
 
 st.set_page_config(
@@ -130,8 +135,9 @@ with st.sidebar:
     page = st.radio(
         "เลือกหน้า",
         ["📊 Dashboard", "🔍 Analyze หุ้นเดี่ยว", "💰 Fair Value (FA)",
-         "🔬 Sensitivity", "🏆 Peer Compare", "🚨 Buy/Sell Alerts",
-         "📋 Screen Universe", "🎯 Next Picks", "📜 Alpha Picks History"],
+         "📤 Upload & Override", "🔬 Sensitivity", "🏆 Peer Compare",
+         "🚨 Buy/Sell Alerts", "📋 Screen Universe", "🎯 Next Picks",
+         "📜 Alpha Picks History"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -610,6 +616,127 @@ elif page == "💰 Fair Value (FA)":
         elif fv:
             st.error("ไม่สามารถคำนวณ fair value ได้ — ข้อมูลไม่เพียงพอ (ต้องมี FCF + EPS เป็นบวก)")
             st.json({k: v.get("error", "ok") for k, v in fv["models"].items()})
+
+
+# ──────────────────────────────────────────────────────────────────
+# PAGE: Upload & Override
+# ──────────────────────────────────────────────────────────────────
+elif page == "📤 Upload & Override":
+    st.subheader("📤 Upload File / Manual Override")
+    st.caption("ใส่ข้อมูลที่ดีกว่า yfinance (Adjusted EPS, guidance) → ระบบจะใช้ค่านี้แทน")
+
+    tab1, tab2, tab3 = st.tabs(["📁 Upload File", "✍️ กรอก Manual", "📋 ดู Overrides ทั้งหมด"])
+
+    # ── TAB 1: Upload ─────────────────────────────────────────────
+    with tab1:
+        c1, c2 = st.columns([3, 1])
+        up_ticker = c1.text_input("Ticker", value="WAB", key="up_tk").upper().strip()
+        c2.write(""); c2.write("")
+        c2.caption("(เลือก ticker ก่อน)")
+
+        st.write("**รองรับไฟล์:** HTML, PDF, CSV, Excel")
+        up_file = st.file_uploader(
+            "เลือกไฟล์",
+            type=["html", "htm", "pdf", "csv", "xlsx", "xls", "txt"],
+            key="up_file",
+        )
+
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            if st.button("📥 Download CSV Template", key="dl_tmpl"):
+                st.download_button(
+                    "⬇️ Save template.csv",
+                    template_csv().encode("utf-8"),
+                    "override_template.csv", "text/csv",
+                    key="dl_tmpl_btn",
+                )
+
+        if up_file is not None:
+            content = up_file.read()
+            st.info(f"📄 ไฟล์: {up_file.name} · {len(content)/1024:.1f} KB")
+
+            with st.spinner("กำลัง parse ไฟล์..."):
+                extracted = parse_file(up_file.name, content)
+
+            if "_error" in extracted:
+                st.error(f"Parse error: {extracted['_error']}")
+            elif not extracted:
+                st.warning("ไม่พบข้อมูลที่ extract ได้ ลองใส่เอง tab ถัดไป")
+            else:
+                st.success(f"✅ Extract ได้ {len(extracted)} fields")
+                st.json(extracted)
+
+                if st.button("💾 บันทึก Override จากไฟล์นี้", key="save_extracted"):
+                    if up_ticker:
+                        set_override(up_ticker, extracted)
+                        st.success(f"✅ บันทึก override สำหรับ {up_ticker} แล้ว")
+                        st.cache_data.clear()
+                    else:
+                        st.error("กรอก ticker ก่อน")
+
+    # ── TAB 2: Manual Entry ───────────────────────────────────────
+    with tab2:
+        man_ticker = st.text_input("Ticker", value="WAB", key="man_tk").upper().strip()
+
+        existing = get_override(man_ticker) if man_ticker else {}
+        if existing:
+            st.info(f"📋 มี override อยู่แล้ว — แก้ไขด้านล่าง (last updated: {existing.get('updated_at', 'n/a')})")
+
+        with st.form("override_form"):
+            st.write("**ใส่เฉพาะ field ที่รู้ — เว้นว่างถ้าไม่รู้** (ระบบจะใช้ yfinance แทน)")
+            cols = st.columns(2)
+            data = {}
+            keys = list(SCHEMA.keys())
+            for i, key in enumerate(keys):
+                meta = SCHEMA[key]
+                col = cols[i % 2]
+                default = existing.get(key, "")
+                if key in ("notes", "source"):
+                    data[key] = col.text_area(
+                        meta["label"], value=str(default) if default else "",
+                        key=f"man_{key}",
+                    )
+                else:
+                    val = col.number_input(
+                        meta["label"],
+                        value=float(default) if default not in (None, "") else 0.0,
+                        format="%.4f", step=0.01, key=f"man_{key}",
+                    )
+                    data[key] = val if val != 0 else None
+
+            c1, c2 = st.columns(2)
+            saved = c1.form_submit_button("💾 บันทึก Override")
+            cleared = c2.form_submit_button("🗑️ ลบ Override")
+
+        if saved and man_ticker:
+            cleaned = {k: v for k, v in data.items() if v not in (None, "", 0.0)}
+            set_override(man_ticker, cleaned)
+            st.success(f"✅ บันทึก override สำหรับ {man_ticker}")
+            st.cache_data.clear()
+            st.rerun()
+
+        if cleared and man_ticker:
+            if delete_override(man_ticker):
+                st.success(f"🗑️ ลบ override ของ {man_ticker}")
+                st.cache_data.clear()
+                st.rerun()
+
+    # ── TAB 3: List All ───────────────────────────────────────────
+    with tab3:
+        all_ov = list_overrides()
+        if not all_ov:
+            st.info("ยังไม่มี override — ใส่จาก tab ด้านบน")
+        else:
+            df_ov = pd.DataFrame(all_ov)
+            st.dataframe(df_ov, use_container_width=True, hide_index=True)
+
+            st.divider()
+            del_ticker = st.text_input("ลบ override ของ ticker:", key="del_tk")
+            if st.button("🗑️ ลบ", key="del_btn"):
+                if delete_override(del_ticker):
+                    st.success(f"ลบ {del_ticker.upper()} แล้ว")
+                    st.cache_data.clear()
+                    st.rerun()
 
 
 # ──────────────────────────────────────────────────────────────────
