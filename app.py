@@ -425,7 +425,7 @@ elif page == "💰 Fair Value (FA)":
             with tab1:
                 inc_df = income_summary(stmts["income"])
                 if not inc_df.empty:
-                    st.dataframe(inc_df.applymap(
+                    st.dataframe(inc_df.map(
                         lambda x: f"${x/1e9:.2f}B" if pd.notna(x) and abs(x) > 1e6
                                   else (f"${x:.2f}" if pd.notna(x) else "-")
                     ), use_container_width=True)
@@ -443,14 +443,14 @@ elif page == "💰 Fair Value (FA)":
             with tab2:
                 bs_df = balance_summary(stmts["balance"])
                 if not bs_df.empty:
-                    st.dataframe(bs_df.applymap(
+                    st.dataframe(bs_df.map(
                         lambda x: f"${x/1e9:.2f}B" if pd.notna(x) else "-"
                     ), use_container_width=True)
 
             with tab3:
                 cf_df = cashflow_summary(stmts["cashflow"])
                 if not cf_df.empty:
-                    st.dataframe(cf_df.applymap(
+                    st.dataframe(cf_df.map(
                         lambda x: f"${x/1e9:.2f}B" if pd.notna(x) else "-"
                     ), use_container_width=True)
 
