@@ -1,0 +1,116 @@
+# Scan universe — focus on Alpha Picks favorite themes.
+# AI infrastructure / semiconductors
+NVDA
+AMD
+AVGO
+MRVL
+MU
+CRDO
+LITE
+CLS
+APP
+ANET
+AMAT
+LRCX
+KLAC
+ON
+MCHP
+QCOM
+TSM
+ASML
+SMCI
+COHR
+FN
+IPGP
+# Power, grid, electrical, data-center buildout
+POWL
+GEV
+ETN
+VRT
+PWR
+AGX
+STRL
+MYRG
+PRIM
+NVT
+HUBB
+ROK
+EMR
+# Industrials / reshoring
+TTMI
+JBL
+FLEX
+SANM
+BLBD
+DY
+IESC
+J
+ACM
+FIX
+# Financials
+MFC
+PRU
+MET
+SYF
+ALL
+PGR
+COF
+DFS
+EZPW
+WAL
+SCHW
+KKR
+APO
+# Consumer disc / cyclical
+RCL
+CCL
+NCLH
+EAT
+DRI
+LULU
+ULTA
+DECK
+W
+# Materials / mining / precious metals
+NEM
+KGC
+B
+AEM
+GOLD
+CDE
+SSRM
+NEXA
+CSTM
+FCX
+SCCO
+RIO
+# Energy
+PARR
+DINO
+MPC
+VLO
+PSX
+# Health care
+ARQT
+INCY
+VRTX
+REGN
+LLY
+# Comms
+TMUS
+TIGO
+TKO
+NFLX
+META
+GOOGL
+# Mid-cap quality candidates
+UBER
+TWLO
+OKTA
+DDOG
+NET
+SNOW
+MDB
+ZS
+PANW
+CRWD
