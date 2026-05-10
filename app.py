@@ -152,6 +152,48 @@ with st.sidebar:
     st.caption("Data: yfinance · ฟรี · ไม่ต้อง API key")
 
 
+def _merge_extracted(per_file_results: list[dict], mode: str) -> dict:
+    """Merge extracted dicts from multiple files.
+
+    mode:
+      📊 Average    — average numeric values, concat strings
+      🔄 Last wins  — later files override earlier
+      🎯 First wins — keep first value seen
+    """
+    valid = [r["extracted"] for r in per_file_results
+             if r["extracted"] and "_error" not in r["extracted"]]
+    if not valid:
+        return {}
+
+    if "Last" in mode:
+        merged = {}
+        for d in valid:
+            merged.update(d)
+        return merged
+
+    if "First" in mode:
+        merged = {}
+        for d in valid:
+            for k, v in d.items():
+                if k not in merged:
+                    merged[k] = v
+        return merged
+
+    merged = {}
+    keys = set().union(*[d.keys() for d in valid])
+    for k in keys:
+        values = [d[k] for d in valid if k in d and d[k] is not None]
+        if not values:
+            continue
+        if all(isinstance(v, (int, float)) for v in values):
+            merged[k] = sum(values) / len(values)
+        else:
+            strs = [str(v) for v in values if v]
+            unique = list(dict.fromkeys(strs))
+            merged[k] = " · ".join(unique) if len(unique) > 1 else unique[0]
+    return merged
+
+
 def get_universe() -> list[str]:
     if universe_choice.startswith("Custom"):
         text = custom_input.replace(",", "\n")
@@ -632,44 +674,82 @@ elif page == "📤 Upload & Override":
         c1, c2 = st.columns([3, 1])
         up_ticker = c1.text_input("Ticker", value="WAB", key="up_tk").upper().strip()
         c2.write(""); c2.write("")
-        c2.caption("(เลือก ticker ก่อน)")
+        merge_mode = c2.selectbox(
+            "Merge",
+            ["📊 Average", "🔄 Last wins", "🎯 First wins"],
+            help="วิธีรวมข้อมูลเมื่อหลายไฟล์มี field ซ้ำกัน",
+            key="merge_mode",
+        )
 
-        st.write("**รองรับไฟล์:** HTML, PDF, CSV, Excel")
-        up_file = st.file_uploader(
-            "เลือกไฟล์",
+        st.write("**รองรับไฟล์:** HTML, PDF, CSV, Excel · เลือกได้หลายไฟล์")
+        up_files = st.file_uploader(
+            "เลือกไฟล์ (Ctrl+คลิกเลือกหลายไฟล์)",
             type=["html", "htm", "pdf", "csv", "xlsx", "xls", "txt"],
-            key="up_file",
+            accept_multiple_files=True,
+            key="up_files",
         )
 
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            if st.button("📥 Download CSV Template", key="dl_tmpl"):
-                st.download_button(
-                    "⬇️ Save template.csv",
-                    template_csv().encode("utf-8"),
-                    "override_template.csv", "text/csv",
-                    key="dl_tmpl_btn",
-                )
+            st.download_button(
+                "📥 Download CSV Template",
+                template_csv().encode("utf-8"),
+                "override_template.csv", "text/csv",
+                key="dl_tmpl_btn",
+            )
 
-        if up_file is not None:
-            content = up_file.read()
-            st.info(f"📄 ไฟล์: {up_file.name} · {len(content)/1024:.1f} KB")
+        if up_files:
+            st.info(f"📄 อัปโหลด {len(up_files)} ไฟล์")
 
-            with st.spinner("กำลัง parse ไฟล์..."):
-                extracted = parse_file(up_file.name, content)
+            per_file_results = []
+            with st.spinner(f"กำลัง parse {len(up_files)} ไฟล์..."):
+                for f in up_files:
+                    content = f.read()
+                    extracted = parse_file(f.name, content)
+                    per_file_results.append({
+                        "filename": f.name,
+                        "size_kb":  len(content) / 1024,
+                        "extracted": extracted,
+                    })
 
-            if "_error" in extracted:
-                st.error(f"Parse error: {extracted['_error']}")
-            elif not extracted:
-                st.warning("ไม่พบข้อมูลที่ extract ได้ ลองใส่เอง tab ถัดไป")
+            with st.expander("📋 ดูผล parse ของแต่ละไฟล์", expanded=False):
+                for r in per_file_results:
+                    st.markdown(f"**📄 {r['filename']}** · {r['size_kb']:.1f} KB")
+                    if "_error" in r["extracted"]:
+                        st.error(r["extracted"]["_error"])
+                    elif not r["extracted"]:
+                        st.warning("ไม่พบข้อมูลที่ extract ได้")
+                    else:
+                        st.write(f"Found {len(r['extracted'])} fields")
+                        st.json(r["extracted"])
+                    st.divider()
+
+            merged = _merge_extracted(per_file_results, mode=merge_mode)
+
+            if not merged:
+                st.warning("⚠️ ไม่พบข้อมูลในไฟล์ใดๆ")
             else:
-                st.success(f"✅ Extract ได้ {len(extracted)} fields")
-                st.json(extracted)
+                st.success(f"✅ Merge สำเร็จ: รวม {len(merged)} fields")
 
-                if st.button("💾 บันทึก Override จากไฟล์นี้", key="save_extracted"):
+                preview_rows = []
+                for k, v in merged.items():
+                    if k.startswith("_"):
+                        continue
+                    sources = [r["filename"] for r in per_file_results
+                               if k in r["extracted"] and r["extracted"][k] == v]
+                    preview_rows.append({
+                        "Field": k,
+                        "Value": v,
+                        "Sources": " · ".join(sources[:3]) if sources else "merged",
+                    })
+                st.dataframe(pd.DataFrame(preview_rows),
+                             use_container_width=True, hide_index=True)
+
+                if st.button("💾 บันทึก Override (รวมทุกไฟล์)", key="save_merged"):
                     if up_ticker:
-                        set_override(up_ticker, extracted)
-                        st.success(f"✅ บันทึก override สำหรับ {up_ticker} แล้ว")
+                        clean = {k: v for k, v in merged.items() if not k.startswith("_")}
+                        set_override(up_ticker, clean)
+                        st.success(f"✅ บันทึก override สำหรับ {up_ticker} จาก {len(up_files)} ไฟล์")
                         st.cache_data.clear()
                     else:
                         st.error("กรอก ticker ก่อน")
