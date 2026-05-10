@@ -15,6 +15,11 @@ from data_fetcher import fetch_ticker, fetch_universe
 from scorer import apply_filters, score
 from next_picks import rank_next_picks
 from screener import load_universe
+from fair_value import composite_fair_value
+from financial_analysis import (
+    get_statements, income_summary, balance_summary, cashflow_summary,
+    growth_rates, margin_trend, piotroski_f_score, health_ratios,
+)
 
 
 st.set_page_config(
@@ -69,8 +74,8 @@ with st.sidebar:
     st.header("🎛️ Menu")
     page = st.radio(
         "เลือกหน้า",
-        ["📊 Dashboard", "🔍 Analyze หุ้นเดี่ยว", "📋 Screen Universe",
-         "🎯 Next Picks", "📜 Alpha Picks History"],
+        ["📊 Dashboard", "🔍 Analyze หุ้นเดี่ยว", "💰 Fair Value (FA)",
+         "📋 Screen Universe", "🎯 Next Picks", "📜 Alpha Picks History"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -262,6 +267,191 @@ elif page == "🎯 Next Picks":
 
         csv = picks.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download CSV", csv, "next_picks.csv", "text/csv")
+
+
+# ──────────────────────────────────────────────────────────────────
+# PAGE: Fair Value (FA)
+# ──────────────────────────────────────────────────────────────────
+elif page == "💰 Fair Value (FA)":
+    st.subheader("💰 Fair Value Analysis — ประเมินมูลค่าที่แท้จริง")
+    st.caption("รวม DCF + Multiples + Graham + EPV + Piotroski F-Score + งบการเงิน 3-4 ปี")
+
+    col1, col2 = st.columns([3, 1])
+    fv_ticker = col1.text_input("Ticker", value="AAPL", key="fv_tk").upper().strip()
+    col2.write(""); col2.write("")
+    fv_btn = col2.button("💰 Valuate", key="fv_btn")
+
+    with st.expander("⚙️ DCF Assumptions (ปรับได้)"):
+        c1, c2, c3 = st.columns(3)
+        dcf_discount = c1.slider("Discount rate (%)", 6.0, 15.0, 10.0, 0.5) / 100
+        dcf_growth = c2.slider("FCF growth rate (%) — เว้นว่าง = auto", 0.0, 30.0, 0.0, 1.0)
+        dcf_growth_v = (dcf_growth / 100) if dcf_growth > 0 else None
+        c3.write(""); c3.caption("Terminal growth: 2.5% (default)")
+
+    if fv_btn and fv_ticker:
+        with st.spinner(f"กำลังคำนวณ fair value ของ {fv_ticker}..."):
+            try:
+                fv = composite_fair_value(
+                    fv_ticker,
+                    discount_rate=dcf_discount,
+                    growth_rate=dcf_growth_v,
+                )
+            except Exception as e:
+                st.error(f"Error: {e}")
+                fv = None
+
+        if fv and fv.get("composite_fair_value"):
+            # ── Verdict header ──
+            cur = fv["current_price"]
+            fair = fv["composite_fair_value"]
+            mos = fv["margin_of_safety_pct"]
+
+            st.markdown(f"### {fv['verdict']}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("ราคาปัจจุบัน", f"${cur:.2f}")
+            c2.metric("Fair Value", f"${fair:.2f}")
+            c3.metric("Margin of Safety", f"{mos:+.1f}%",
+                      delta=f"{'undervalued' if mos > 0 else 'overvalued'}")
+            upside = (fair / cur - 1) * 100 if cur else 0
+            c4.metric("Upside/Downside", f"{upside:+.1f}%")
+
+            # ── Bar chart of all models ──
+            st.subheader("📊 เปรียบเทียบ Fair Value แต่ละโมเดล")
+            model_data = []
+            for key, m in fv["models"].items():
+                v = m.get("fair_value")
+                if v and v > 0:
+                    model_data.append({"Model": m["method"], "Fair Value": v,
+                                        "Weight": fv["weights"].get(key, 0) * 100})
+            if model_data:
+                mdf = pd.DataFrame(model_data)
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=mdf["Model"], y=mdf["Fair Value"],
+                    text=[f"${v:.2f}" for v in mdf["Fair Value"]],
+                    textposition="outside",
+                    marker_color=["#4f46e5", "#7c3aed", "#ec4899", "#f59e0b"],
+                ))
+                fig.add_hline(y=cur, line_dash="dash", line_color="red",
+                              annotation_text=f"ราคาปัจจุบัน ${cur:.2f}")
+                fig.add_hline(y=fair, line_dash="dot", line_color="green",
+                              annotation_text=f"Composite ${fair:.2f}")
+                fig.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+            # ── DCF details ──
+            with st.expander("🔬 DCF Model Details"):
+                dcf = fv["models"]["dcf"]
+                if dcf.get("error"):
+                    st.warning(dcf["error"])
+                else:
+                    st.write("**Assumptions:**")
+                    a = dcf["assumptions"]
+                    st.write(f"- FCF base: ${a['fcf_base']/1e9:.2f}B")
+                    st.write(f"- Growth rate: {a['growth_rate']*100:.1f}%/year (years 1-{a['high_growth_years']})")
+                    st.write(f"- Terminal growth: {a['terminal_growth']*100:.1f}%")
+                    st.write(f"- Discount rate (WACC): {a['discount_rate']*100:.1f}%")
+                    proj = pd.DataFrame(dcf["projections"])
+                    proj["fcf"] = proj["fcf"].apply(lambda x: f"${x/1e9:.2f}B")
+                    proj["pv"] = proj["pv"].apply(lambda x: f"${x/1e9:.2f}B")
+                    st.dataframe(proj, hide_index=True, use_container_width=True)
+
+            # ── Multiples details ──
+            with st.expander("📏 Multiples Valuation Details"):
+                m = fv["models"]["multiples"]
+                st.write(f"**Sector**: {m['sector']}")
+                st.write(f"**P/E target multiple**: {m['pe_multiple']}x")
+                st.write(f"**EV/EBITDA target multiple**: {m['ev_multiple']}x")
+                if m.get("pe_value"):
+                    st.write(f"- P/E-based fair value: ${m['pe_value']:.2f}")
+                if m.get("ev_ebitda_value"):
+                    st.write(f"- EV/EBITDA-based fair value: ${m['ev_ebitda_value']:.2f}")
+
+            st.divider()
+
+            # ── Financial Statements ──
+            st.subheader("📑 งบการเงิน 3-4 ปี")
+            with st.spinner("กำลังดึงงบ..."):
+                stmts = get_statements(fv_ticker)
+
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(
+                ["📈 Income", "💼 Balance", "💵 Cash Flow", "📊 Margins", "🏆 Piotroski"]
+            )
+
+            with tab1:
+                inc_df = income_summary(stmts["income"])
+                if not inc_df.empty:
+                    st.dataframe(inc_df.applymap(
+                        lambda x: f"${x/1e9:.2f}B" if pd.notna(x) and abs(x) > 1e6
+                                  else (f"${x:.2f}" if pd.notna(x) else "-")
+                    ), use_container_width=True)
+                gr = growth_rates(stmts["income"])
+                if gr:
+                    st.write("**Growth Rates:**")
+                    cols = st.columns(len(gr))
+                    for col, (k, v) in zip(cols, gr.items()):
+                        col.metric(
+                            k.upper(),
+                            f"{v.get('cagr', 0):.1f}% CAGR" if v.get('cagr') else "n/a",
+                            delta=f"{v.get('yoy', 0):.1f}% YoY" if v.get('yoy') else None,
+                        )
+
+            with tab2:
+                bs_df = balance_summary(stmts["balance"])
+                if not bs_df.empty:
+                    st.dataframe(bs_df.applymap(
+                        lambda x: f"${x/1e9:.2f}B" if pd.notna(x) else "-"
+                    ), use_container_width=True)
+
+            with tab3:
+                cf_df = cashflow_summary(stmts["cashflow"])
+                if not cf_df.empty:
+                    st.dataframe(cf_df.applymap(
+                        lambda x: f"${x/1e9:.2f}B" if pd.notna(x) else "-"
+                    ), use_container_width=True)
+
+            with tab4:
+                mt = margin_trend(stmts["income"])
+                if not mt.empty:
+                    st.dataframe(mt, use_container_width=True)
+                    fig = go.Figure()
+                    for idx in mt.index:
+                        fig.add_trace(go.Scatter(
+                            x=mt.columns, y=mt.loc[idx], mode="lines+markers", name=idx,
+                        ))
+                    fig.update_layout(height=350, yaxis_title="%")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with tab5:
+                with st.spinner("กำลังคำนวณ Piotroski F-Score..."):
+                    pf = piotroski_f_score(fv_ticker)
+                c1, c2 = st.columns(2)
+                c1.metric("F-Score", f"{pf['score']}/9")
+                c2.metric("Quality", pf["rating"])
+                for d in pf["details"]:
+                    st.write(d)
+
+            st.divider()
+            st.subheader("📋 Health Ratios")
+            hr = health_ratios(fv_ticker)
+            cols = st.columns(4)
+            i = 0
+            for k, v in hr.items():
+                if v is None:
+                    continue
+                if isinstance(v, float):
+                    if "Margin" in k or "Yield" in k or "ROE" in k or "ROA" in k or "Ratio" in k and abs(v) < 5:
+                        disp = f"{v*100:.2f}%" if abs(v) < 5 else f"{v:.2f}"
+                    else:
+                        disp = f"{v:.2f}"
+                else:
+                    disp = str(v)
+                cols[i % 4].metric(k, disp)
+                i += 1
+
+        elif fv:
+            st.error("ไม่สามารถคำนวณ fair value ได้ — ข้อมูลไม่เพียงพอ (ต้องมี FCF + EPS เป็นบวก)")
+            st.json({k: v.get("error", "ok") for k, v in fv["models"].items()})
 
 
 # ──────────────────────────────────────────────────────────────────
