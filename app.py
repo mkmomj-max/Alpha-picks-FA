@@ -23,6 +23,8 @@ from financial_analysis import (
 from sensitivity import sensitivity_matrix, implied_assumptions
 from peer_compare import find_peers, compare_peers, relative_rank
 from alerts import evaluate_single, evaluate_portfolio, bulk_fair_value
+from assumptions import full_auto_suggest
+from scenario_valuation import scenario_valuation
 
 
 st.set_page_config(
@@ -103,6 +105,16 @@ def cached_evaluate_portfolio(tickers: tuple, universe_tuple: tuple):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_bulk_fv(tickers: tuple):
     return bulk_fair_value(list(tickers))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_auto_suggest(symbol: str):
+    return full_auto_suggest(symbol)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_scenarios(symbol: str):
+    return scenario_valuation(symbol)
 
 
 # ── Header ────────────────────────────────────────────────────────
@@ -325,12 +337,60 @@ elif page == "💰 Fair Value (FA)":
     col2.write(""); col2.write("")
     fv_btn = col2.button("💰 Valuate", key="fv_btn")
 
-    with st.expander("⚙️ DCF Assumptions (ปรับได้)"):
-        c1, c2, c3 = st.columns(3)
-        dcf_discount = c1.slider("Discount rate (%)", 6.0, 15.0, 10.0, 0.5) / 100
-        dcf_growth = c2.slider("FCF growth rate (%) — เว้นว่าง = auto", 0.0, 30.0, 0.0, 1.0)
-        dcf_growth_v = (dcf_growth / 100) if dcf_growth > 0 else None
-        c3.write(""); c3.caption("Terminal growth: 2.5% (default)")
+    use_auto = st.checkbox("🤖 ใช้ Auto-Suggest (แนะนำ — ระบบคิด assumptions ให้)",
+                            value=True, key="fv_auto")
+
+    if use_auto and fv_ticker:
+        with st.spinner("กำลังคำนวณ assumptions แนะนำ..."):
+            try:
+                sug = cached_auto_suggest(fv_ticker)
+                st.success("✅ ระบบแนะนำ assumptions ตามนี้:")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("💰 WACC (Discount Rate)",
+                          f"{sug['wacc']['wacc']*100:.1f}%",
+                          help=sug['wacc']['explanation'])
+                c2.metric("📈 Growth Rate (Base)",
+                          f"{sug['growth']['base']*100:.1f}%",
+                          delta=f"Confidence: {sug['growth']['confidence']}")
+                c3.metric("📊 P/E Multiple (Quality-adj)",
+                          f"{sug['pe']['adjusted_pe']:.1f}×",
+                          delta=f"Sector base {sug['pe']['base_pe']}× {sug['pe']['quality_premium_pct']:+.0f}%")
+
+                with st.expander("📋 รายละเอียดการคำนวณ assumptions"):
+                    st.write("**WACC (CAPM):**")
+                    st.code(sug['wacc']['explanation'])
+                    st.write("**Growth Rate (blended from):**")
+                    st.markdown(sug['growth']['explanation'])
+                    if sug['pe']['notes']:
+                        st.write("**P/E Quality Adjustments:**")
+                        for n in sug['pe']['notes']:
+                            st.write(f"- {n}")
+
+                dcf_discount = sug['wacc']['wacc']
+                dcf_growth_v = sug['growth']['base']
+            except Exception as e:
+                st.warning(f"Auto-suggest ใช้ไม่ได้: {e}")
+                dcf_discount = 0.10
+                dcf_growth_v = None
+
+        with st.expander("⚙️ Override Assumptions (ถ้าอยากปรับเอง)"):
+            c1, c2 = st.columns(2)
+            override_dr = c1.number_input("Discount rate %", 6.0, 15.0,
+                                           value=float(dcf_discount * 100), step=0.5)
+            override_gr = c2.number_input("Growth rate %", 0.0, 30.0,
+                                           value=float((dcf_growth_v or 0.10) * 100), step=0.5)
+            if st.checkbox("Apply override"):
+                dcf_discount = override_dr / 100
+                dcf_growth_v = override_gr / 100
+    else:
+        with st.expander("⚙️ DCF Assumptions (ปรับเอง)"):
+            c1, c2, c3 = st.columns(3)
+            dcf_discount = c1.slider("Discount rate (%)", 6.0, 15.0, 10.0, 0.5) / 100
+            dcf_growth = c2.slider("FCF growth rate (%) — 0 = auto", 0.0, 30.0, 0.0, 1.0)
+            dcf_growth_v = (dcf_growth / 100) if dcf_growth > 0 else None
+            c3.write(""); c3.caption("Terminal growth: 2.5%")
+
+    st.divider()
 
     if fv_btn and fv_ticker:
         with st.spinner(f"กำลังคำนวณ fair value ของ {fv_ticker}..."):
@@ -358,6 +418,60 @@ elif page == "💰 Fair Value (FA)":
                       delta=f"{'undervalued' if mos > 0 else 'overvalued'}")
             upside = (fair / cur - 1) * 100 if cur else 0
             c4.metric("Upside/Downside", f"{upside:+.1f}%")
+
+            # ── Bear / Base / Bull Scenarios ──
+            st.divider()
+            st.subheader("🎭 Bear / Base / Bull Scenarios")
+            st.caption("3 สถานการณ์ — ระบบคิด assumptions ให้อัตโนมัติ (เหมือน analyst report)")
+            with st.spinner("กำลังคำนวณ scenarios..."):
+                try:
+                    sc = cached_scenarios(fv_ticker)
+                except Exception as e:
+                    st.warning(f"Scenarios error: {e}")
+                    sc = None
+
+            if sc:
+                cols = st.columns(3)
+                styles = [
+                    ("🐻 Bear", "bear", "#dc2626", "#7f1d1d"),
+                    ("⚖️ Base", "base", "#2563eb", "#1e3a8a"),
+                    ("🐂 Bull", "bull", "#16a34a", "#14532d"),
+                ]
+                for col, (label, key, color, bg) in zip(cols, styles):
+                    s = sc["scenarios"][key]
+                    fv_s = s.get("fair_value")
+                    up = s.get("upside_pct")
+                    with col:
+                        st.markdown(
+                            f"""<div style="background:{bg};padding:1rem;border-radius:8px;border:1px solid {color}">
+                            <h3 style="color:{color};margin:0">{label}</h3>
+                            <p style="font-size:28px;font-weight:600;margin:8px 0;color:white">
+                                {'$'+str(round(fv_s)) if fv_s else 'n/a'}
+                            </p>
+                            <p style="color:white;margin:0">
+                                {f"{up:+.0f}%" if up is not None else "—"} vs current
+                            </p>
+                            <hr style="border-color:{color};opacity:0.3"/>
+                            <p style="font-size:12px;margin:4px 0;color:#ccc">
+                                Growth: {s['growth_rate']*100:.1f}%/y<br/>
+                                WACC: {s['discount_rate']*100:.1f}%<br/>
+                                P/E: {s['pe_multiple']:.1f}×
+                            </p>
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+
+                with st.expander("💡 ทำไมไม่ต้องเดา assumptions เอง?"):
+                    a = sc["assumptions"]
+                    st.write("**📊 Growth Rate มาจากไหน?**")
+                    st.markdown(a["growth"]["explanation"])
+                    st.write(f"\n**💰 WACC:** {a['wacc']['explanation']}")
+                    st.write(f"\n**📈 P/E Multiple:** Sector base {a['pe']['base_pe']}× "
+                             f"× quality adj {a['pe']['quality_premium_pct']:+.0f}% "
+                             f"= {a['pe']['adjusted_pe']:.1f}×")
+                    if a["pe"]["notes"]:
+                        for n in a["pe"]["notes"]:
+                            st.write(f"  - {n}")
 
             # ── Bar chart of all models ──
             st.subheader("📊 เปรียบเทียบ Fair Value แต่ละโมเดล")
