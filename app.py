@@ -20,6 +20,9 @@ from financial_analysis import (
     get_statements, income_summary, balance_summary, cashflow_summary,
     growth_rates, margin_trend, piotroski_f_score, health_ratios,
 )
+from sensitivity import sensitivity_matrix, implied_assumptions
+from peer_compare import find_peers, compare_peers, relative_rank
+from alerts import evaluate_single, evaluate_portfolio, bulk_fair_value
 
 
 st.set_page_config(
@@ -62,6 +65,46 @@ def cached_screen(universe_tuple: tuple) -> pd.DataFrame:
     return score(filtered)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_fair_value(symbol: str, dr: float, gr):
+    return composite_fair_value(symbol, discount_rate=dr, growth_rate=gr)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_sensitivity(symbol: str):
+    return sensitivity_matrix(symbol)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_implied(symbol: str):
+    return implied_assumptions(symbol)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_peers(symbol: str):
+    peers = find_peers(symbol)
+    df = compare_peers(symbol, peers)
+    ranks = relative_rank(df, symbol)
+    return df, ranks
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_evaluate(symbol: str, universe_tuple: tuple):
+    uni_df = cached_screen(universe_tuple)
+    return evaluate_single(symbol, peer_universe=uni_df)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_evaluate_portfolio(tickers: tuple, universe_tuple: tuple):
+    uni_df = cached_screen(universe_tuple)
+    return evaluate_portfolio(list(tickers), peer_universe=uni_df)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_bulk_fv(tickers: tuple):
+    return bulk_fair_value(list(tickers))
+
+
 # ── Header ────────────────────────────────────────────────────────
 st.markdown('<div class="main-title">📈 Alpha Picks FA</div>', unsafe_allow_html=True)
 st.markdown('<p class="subtitle">DIY Quant Screener — เลียนแบบและพัฒนาต่อจาก Seeking Alpha Alpha Picks</p>',
@@ -75,6 +118,7 @@ with st.sidebar:
     page = st.radio(
         "เลือกหน้า",
         ["📊 Dashboard", "🔍 Analyze หุ้นเดี่ยว", "💰 Fair Value (FA)",
+         "🔬 Sensitivity", "🏆 Peer Compare", "🚨 Buy/Sell Alerts",
          "📋 Screen Universe", "🎯 Next Picks", "📜 Alpha Picks History"],
         label_visibility="collapsed",
     )
@@ -452,6 +496,270 @@ elif page == "💰 Fair Value (FA)":
         elif fv:
             st.error("ไม่สามารถคำนวณ fair value ได้ — ข้อมูลไม่เพียงพอ (ต้องมี FCF + EPS เป็นบวก)")
             st.json({k: v.get("error", "ok") for k, v in fv["models"].items()})
+
+
+# ──────────────────────────────────────────────────────────────────
+# PAGE: Sensitivity Analysis
+# ──────────────────────────────────────────────────────────────────
+elif page == "🔬 Sensitivity":
+    st.subheader("🔬 DCF Sensitivity Analysis")
+    st.caption("ดู Fair Value เปลี่ยนยังไงเมื่อปรับ discount rate และ growth rate")
+
+    c1, c2 = st.columns([3, 1])
+    s_ticker = c1.text_input("Ticker", value="NVDA", key="sens_tk").upper().strip()
+    c2.write(""); c2.write("")
+    s_btn = c2.button("🔬 วิเคราะห์", key="sens_btn")
+
+    if s_btn and s_ticker:
+        with st.spinner("กำลังคำนวณ matrix..."):
+            try:
+                matrix = cached_sensitivity(s_ticker)
+                implied = cached_implied(s_ticker)
+            except Exception as e:
+                st.error(f"Error: {e}")
+                matrix = None
+
+        if matrix is not None and not matrix.empty:
+            current = implied.get("current_price")
+            if current:
+                st.metric("ราคาปัจจุบัน", f"${current:.2f}")
+
+            st.subheader("📊 Fair Value Matrix")
+            st.caption("แถว = Discount Rate (WACC), คอลัมน์ = Growth Rate")
+
+            def color_cell(v):
+                if pd.isna(v) or current is None:
+                    return ""
+                diff = (v - current) / current * 100
+                if diff >= 30:   return "background-color: #14532d; color: white"
+                if diff >= 10:   return "background-color: #166534; color: white"
+                if diff >= -10:  return "background-color: #713f12; color: white"
+                if diff >= -30:  return "background-color: #7f1d1d; color: white"
+                return "background-color: #450a0a; color: white"
+
+            styled = matrix.style.format("${:.0f}").map(color_cell)
+            st.dataframe(styled, use_container_width=True)
+            st.caption("🟢 เขียวเข้ม = undervalued มาก · 🔴 แดงเข้ม = overvalued มาก")
+
+            st.divider()
+            st.subheader("🎯 Implied Market Expectations")
+            ig = implied.get("implied_growth_at_10pct_discount")
+            if ig is not None:
+                c1, c2 = st.columns(2)
+                c1.metric("Implied Growth Rate", f"{ig:.1f}%/year",
+                          help="ที่ discount=10% ตลาดคิดว่าหุ้นต้องโตเท่านี้ ราคาถึงจะ fair")
+                c2.info(implied.get("interpretation", ""))
+            else:
+                st.warning("ไม่สามารถคำนวณ implied growth ได้")
+
+
+# ──────────────────────────────────────────────────────────────────
+# PAGE: Peer Compare
+# ──────────────────────────────────────────────────────────────────
+elif page == "🏆 Peer Compare":
+    st.subheader("🏆 Peer Comparison")
+    st.caption("เทียบหุ้นกับคู่แข่งใน sector — หา relative value")
+
+    c1, c2 = st.columns([3, 1])
+    p_ticker = c1.text_input("Ticker", value="NVDA", key="peer_tk").upper().strip()
+    c2.write(""); c2.write("")
+    p_btn = c2.button("🏆 เทียบ", key="peer_btn")
+
+    if p_btn and p_ticker:
+        with st.spinner(f"กำลังหา peers ของ {p_ticker}..."):
+            try:
+                df, ranks = cached_peers(p_ticker)
+            except Exception as e:
+                st.error(f"Error: {e}")
+                df = None
+
+        if df is not None and not df.empty:
+            st.success(f"พบ {len(df)} ตัวให้เปรียบเทียบ")
+
+            display = df.copy()
+            for c in ["Price", "Mkt Cap (B)", "P/E (fwd)", "P/S", "EV/EBITDA",
+                      "PEG", "Rev Growth %", "Op Margin %", "ROE %", "D/E", "Div Yield %"]:
+                if c in display.columns:
+                    display[c] = display[c].round(2)
+
+            def highlight_target(row):
+                if row["Ticker"] == p_ticker:
+                    return ["background-color: #1e3a5f; font-weight: bold"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                display.style.apply(highlight_target, axis=1),
+                use_container_width=True, hide_index=True,
+            )
+
+            if ranks:
+                st.divider()
+                st.subheader(f"🎯 Ranking ของ {p_ticker} เทียบ peers")
+                cols = st.columns(3)
+                for i, (metric, info) in enumerate(ranks.items()):
+                    with cols[i % 3]:
+                        rank, of = info["rank"], info["of"]
+                        emoji = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else "📊"
+                        st.metric(
+                            f"{emoji} {metric}",
+                            f"#{rank}/{of}",
+                            delta=f"{info['value']:.2f}",
+                            delta_color="off",
+                        )
+
+                st.divider()
+                st.subheader("📊 Visual Comparison")
+                metric_pick = st.selectbox(
+                    "เลือก metric",
+                    [c for c in ["P/E (fwd)", "EV/EBITDA", "Rev Growth %",
+                                  "Op Margin %", "ROE %"] if c in df.columns],
+                )
+                fig = px.bar(
+                    df.sort_values(metric_pick, ascending=metric_pick in ["P/E (fwd)", "EV/EBITDA"]),
+                    x="Ticker", y=metric_pick,
+                    color=df["Ticker"] == p_ticker,
+                    color_discrete_map={True: "#7c3aed", False: "#475569"},
+                )
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
+
+
+# ──────────────────────────────────────────────────────────────────
+# PAGE: Buy/Sell Alerts
+# ──────────────────────────────────────────────────────────────────
+elif page == "🚨 Buy/Sell Alerts":
+    st.subheader("🚨 Buy/Sell Alert Engine")
+    st.caption("รวม Composite Quant + Margin of Safety + Piotroski + Momentum → Alert")
+
+    mode = st.radio(
+        "โหมด",
+        ["🎯 หุ้นเดี่ยว", "📁 Portfolio (หลายตัว)", "💰 Bulk Fair Value"],
+        horizontal=True,
+    )
+
+    if mode == "🎯 หุ้นเดี่ยว":
+        c1, c2 = st.columns([3, 1])
+        a_ticker = c1.text_input("Ticker", value="NVDA", key="alert_tk").upper().strip()
+        c2.write(""); c2.write("")
+        a_btn = c2.button("🚨 เช็ค Alert", key="alert_btn")
+
+        if a_btn and a_ticker:
+            with st.spinner(f"กำลังประเมิน {a_ticker}..."):
+                try:
+                    uni = get_universe()
+                    r = cached_evaluate(a_ticker, tuple(uni))
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                    r = None
+
+            if r:
+                alert = r.get("alert", "⚪ HOLD")
+                if "STRONG BUY" in alert:
+                    st.success(f"# {alert}")
+                elif "BUY" in alert:
+                    st.success(f"## {alert}")
+                elif "STRONG SELL" in alert:
+                    st.error(f"# {alert}")
+                elif "SELL" in alert:
+                    st.error(f"## {alert}")
+                else:
+                    st.info(f"## {alert}")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("ราคา", f"${r['current_price']:.2f}" if r.get("current_price") else "n/a")
+                c2.metric("Fair Value", f"${r['fair_value']:.2f}" if r.get("fair_value") else "n/a")
+                c3.metric("MoS %", f"{r['margin_of_safety']:+.1f}%" if r.get("margin_of_safety") else "n/a")
+                c4.metric("Composite", f"{r['composite']:.0f}" if r.get("composite") else "n/a")
+
+                c1, c2 = st.columns(2)
+                c1.metric("F-Score", f"{r['piotroski']}/9" if r.get("piotroski") is not None else "n/a")
+                c2.metric("Momentum", f"{r['momentum']:.0f}" if r.get("momentum") else "n/a")
+
+                st.subheader("📋 เหตุผล")
+                for reason in r.get("alert_reason", []):
+                    st.write(f"- {reason}")
+
+                if r.get("warnings"):
+                    with st.expander("⚠️ Warnings"):
+                        for w in r["warnings"]:
+                            st.warning(w)
+
+    elif mode == "📁 Portfolio (หลายตัว)":
+        st.write("ใส่ ticker (คั่นด้วย comma หรือบรรทัด)")
+        port_input = st.text_area(
+            "Tickers", value="NVDA, AAPL, MSFT, GOOGL, AMZN, KGC, BRK.B",
+            height=100,
+        )
+        if st.button("🚨 ประเมินทั้ง Portfolio", key="port_btn"):
+            tickers = [t.strip().upper() for t in port_input.replace(",", "\n").split() if t.strip()]
+            if tickers:
+                with st.spinner(f"กำลังประเมิน {len(tickers)} หุ้น..."):
+                    try:
+                        uni = get_universe()
+                        df = cached_evaluate_portfolio(tuple(tickers), tuple(uni))
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        df = None
+
+                if df is not None and not df.empty:
+                    counts = df["Alert"].value_counts()
+                    cols = st.columns(min(len(counts), 5))
+                    for i, (alert, n) in enumerate(counts.items()):
+                        cols[i % len(cols)].metric(alert, n)
+
+                    st.divider()
+                    display = df.copy()
+                    for c in ["Price", "FairValue", "MoS %", "Composite", "Momentum"]:
+                        if c in display.columns:
+                            display[c] = pd.to_numeric(display[c], errors="coerce").round(2)
+                    st.dataframe(display, use_container_width=True, hide_index=True)
+
+                    csv = df.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Download CSV", csv, "alerts.csv", "text/csv")
+
+    else:  # Bulk Fair Value
+        st.caption("คำนวณ Fair Value ของหุ้นหลายตัวทีเดียว")
+        bulk_input = st.text_area(
+            "Tickers (คั่นด้วย comma หรือบรรทัด)",
+            value="NVDA, AAPL, MSFT, GOOGL, BRK.B, KGC, NEM, GEV",
+            height=100,
+        )
+        if st.button("💰 คำนวณ Bulk", key="bulk_btn"):
+            tickers = [t.strip().upper() for t in bulk_input.replace(",", "\n").split() if t.strip()]
+            if tickers:
+                with st.spinner(f"กำลังคำนวณ {len(tickers)} หุ้น..."):
+                    try:
+                        df = cached_bulk_fv(tuple(tickers))
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        df = None
+
+                if df is not None and not df.empty:
+                    display = df.copy()
+                    for c in ["Price", "Fair Value", "MoS %"]:
+                        if c in display.columns:
+                            display[c] = pd.to_numeric(display[c], errors="coerce").round(2)
+                    st.dataframe(display, use_container_width=True, hide_index=True)
+
+                    if "MoS %" in df.columns:
+                        plot_df = df.dropna(subset=["MoS %"]).copy()
+                        if not plot_df.empty:
+                            plot_df["color"] = plot_df["MoS %"].apply(
+                                lambda x: "Undervalued" if x > 10 else
+                                          ("Overvalued" if x < -10 else "Fair")
+                            )
+                            fig = px.bar(
+                                plot_df, x="Ticker", y="MoS %", color="color",
+                                color_discrete_map={"Undervalued": "#16a34a",
+                                                     "Fair": "#eab308",
+                                                     "Overvalued": "#dc2626"},
+                                title="Margin of Safety เรียงจากมากไปน้อย",
+                            )
+                            fig.update_layout(height=400)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    csv = df.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Download CSV", csv, "bulk_fair_value.csv", "text/csv")
 
 
 # ──────────────────────────────────────────────────────────────────
